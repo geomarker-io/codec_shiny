@@ -289,7 +289,10 @@ server <- function(input, output, session) {
 
   d_sel_dpkgs <- reactive({
     dpkgs[input$sel_dpkgs]
+
   })
+  
+  
 
   d_avail_vars <- reactive({
     if (is.null(input$sel_dpkgs)) {
@@ -308,7 +311,10 @@ server <- function(input, output, session) {
       
       d_avail_vars <- named_vars
     }
+
   })
+  
+ 
 
 
   output$x_sel <- renderUI({
@@ -325,7 +331,10 @@ server <- function(input, output, session) {
          liveSearch = TRUE
       )
    )
+
   })
+  
+ 
 
   output$y_sel <- renderUI({
 
@@ -341,7 +350,10 @@ server <- function(input, output, session) {
         liveSearch = TRUE
       )
     )
+
   })
+  
+  
 
   observeEvent(input$select_all, {
     updateCheckboxGroupInput(inputId = "sel_dpkgs", selected = names(dpkgs))
@@ -466,7 +478,7 @@ server <- function(input, output, session) {
       out_scat <- out_scat |>
         mutate(bi_class = paste0(as.numeric(bi_x), "-", as.numeric(bi_y)))
       
-      scatter_panels <- ggplot(out_scat, aes_string(x = x, y= y))+#$x, y = input$y)) +
+      scatter_panels <- ggplot(out_scat, aes_string(x = input$x, y = input$y))+#$x, y = input$y)) +
         annotate("rect",
           xmin = -Inf, xmax = bins_x[2],
           ymin = -Inf, ymax = bins_y[2],
@@ -846,7 +858,7 @@ server <- function(input, output, session) {
         out_scat <- out_scat |>
           mutate(bi_class = paste0(as.numeric(bi_x), "-", as.numeric(bi_y)))
 
-        scatter_panels <- ggplot(out_scat, aes_string(x = x, y= y))+#$x, y = input$y)) +
+        scatter_panels <- ggplot(out_scat, aes_string(x = input$x , y = input$y))+#$x, y = input$y)) +
           annotate("rect",
                    xmin = -Inf, xmax = bins_x[2],
                    ymin = -Inf, ymax = bins_y[2],
