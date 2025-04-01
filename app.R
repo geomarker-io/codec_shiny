@@ -67,11 +67,7 @@ dpkgs <-
       st_as_sf() |>
       interpolate(cincy::tract_tigris_2010) |>
       st_drop_geometry() |>
-      tibble::as_tibble(),
-    xx_address = 
-      get_codec_dpkg("xx_address-v0.2.0") |> 
-      slice_max(year, by = census_tract_id_2010) |> 
-      slice_max(month, by = census_tract_id_2010)
+      tibble::as_tibble()
   )
 
 tracts_sf <- cincy::tract_tigris_2010
@@ -147,8 +143,7 @@ selector_codec_dpkgs <-
       "Parcel",
       "Traffic",
       "Property Code Enforcements",
-      "Voter Participation", 
-      "XX Address"
+      "Voter Participation"
     )),
     selected = c("hh_acs_measures"),
     multiple = TRUE,
