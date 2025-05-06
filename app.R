@@ -1,9 +1,4 @@
-# if (tryCatch(read.dcf("../../DESCRIPTION")[1, "Package"] == "codec", finally = FALSE)) {
-#   devtools::load_all()
-# } else {
 library(codec)
-#}
-
 library(fr)
 library(shiny)
 library(cincy)
@@ -17,7 +12,6 @@ library(shinyWidgets)
 library(leaflet)
 library(sf)
 library(codec)
-
 
 dpkgs <-
   list(
@@ -34,8 +28,12 @@ dpkgs <-
       select(-year),
     drivetime = get_codec_dpkg("drivetime-v0.2.2") |>
       select(-year),
-    # change landcover to green
-    landcover = get_codec_dpkg("landcover-v0.1.0") |>
+    green = get_codec_dpkg("green-v0.1.0") |>
+      dplyr::left_join(cincy::tract_tigris_2020, by = "census_tract_id_2020") |>
+      st_as_sf() |>
+      interpolate(cincy::tract_tigris_2010) |>
+      st_drop_geometry() |>
+      tibble::as_tibble() |>
       select(-year),
     parcel = get_codec_dpkg("parcel-v0.1.1") |>
       select(-year),
@@ -64,10 +62,11 @@ dpkgs <-
       st_as_sf() |>
       interpolate(cincy::tract_tigris_2010) |>
       st_drop_geometry() |>
-      tibble::as_tibble()
-    # inlcude crime? needs summarized first
-    #  crime = get_codec_dpkg("xx_address-v0.2.0") |>
-    #    select(-year)
+      tibble::as_tibble(),
+    crime = get_codec_dpkg("xx_address-v0.2.0") |>
+      slice_max(year, by = census_tract_id_2010) |>
+      slice_max(month, by = census_tract_id_2010) |>
+      select(-year, -month)
   )
 
 tracts_sf <- cincy::tract_tigris_2010
@@ -83,6 +82,7 @@ d_all <-
   st_as_sf() |>
   st_transform(st_crs(4326))
 
+# fmt: skip
 codec_bi_pal <- c(
   "1-1" = "#eddcc1",
   "2-1" = "#d4aa92",
@@ -95,27 +95,19 @@ codec_bi_pal <- c(
   "3-3" = "#2b3135"
 )
 
-codec_bi_pal_2 <- tibble::tribble(
-  ~group,
-  ~fill,
-  "1-1",
-  "#eddcc1",
-  "2-1",
-  "#d4aa92",
-  "3-1",
-  "#bb7964",
-  "1-2",
-  "#909992",
-  "2-2",
-  "#81766f",
-  "3-2",
-  "#71544c",
-  "1-3",
-  "#375a66",
-  "2-3",
-  "#31464d",
-  "3-3",
-  "#2b3135"
+# fmt: skip
+codec_bi_pal_2 <- 
+  tibble::tribble(
+    ~group, ~fill,
+    "1-1", "#eddcc1",
+    "2-1", "#d4aa92",
+    "3-1", "#bb7964",
+    "1-2", "#909992",
+    "2-2", "#81766f",
+    "3-2", "#71544c",
+    "1-3", "#375a66",
+    "2-3", "#31464d",
+    "3-3", "#2b3135"
 )
 
 uni_colors <- c(
@@ -126,7 +118,6 @@ uni_colors <- c(
   "#CCDCE3",
   "#F6EDDE"
 )
-
 
 ## ----
 
@@ -145,7 +136,6 @@ geography_selector <-
       )
     ) |>
       tagAppendAttributes(style = "color: #C28273; background-color: #FFFFFF;"),
-
     choices = c(
       "census tract" = "tract",
       "ZCTA" = "zcta",
@@ -166,11 +156,12 @@ selector_codec_dpkgs <-
         "Environmental Justice Index",
         "Harmonized Historical ACS Measures",
         "Drivetime",
-        "Landcover",
+        "Green",
         "Parcel",
         "Traffic",
         "Property Code Enforcements",
-        "Voter Participation"
+        "Voter Participation",
+        "Crime"
       )
     ),
     selected = c("hh_acs_measures"),
@@ -394,9 +385,13 @@ server <- function(input, output, session) {
 
       # cut into groups defined above
       out <- d() |>
-        mutate(bi_x = cut(get(input$x), breaks = bins_x, include.lowest = TRUE))
+        mutate(
+          bi_x = .bincode(get(input$x), breaks = bins_x, include.lowest = TRUE)
+        )
       out <- out |>
-        mutate(bi_y = cut(get(input$y), breaks = bins_y, include.lowest = TRUE))
+        mutate(
+          bi_y = .bincode(get(input$y), breaks = bins_y, include.lowest = TRUE)
+        )
       out <- out |>
         mutate(bi_class = paste0(as.numeric(bi_x), "-", as.numeric(bi_y)))
 
@@ -468,7 +463,7 @@ server <- function(input, output, session) {
       # cut into groups defined above
       out <- d() |>
         mutate(
-          bi_x = cut(get(input$x), breaks = bins_x, include.lowest = TRUE)
+          bi_x = .bincode(get(input$x), breaks = bins_x, include.lowest = TRUE)
         ) |>
         mutate(x_class = paste0(as.numeric(bi_x)))
 
@@ -542,20 +537,18 @@ server <- function(input, output, session) {
       # cut into groups defined above
       out_scat <- d() |>
         mutate(
-          bi_x = cut(
+          bi_x = .bincode(
             get(input$x),
             breaks = bins_x,
-            include.lowest = TRUE,
-            labels = c("1", "2", "3")
+            include.lowest = TRUE
           )
         )
       out_scat <- out_scat |>
         mutate(
-          bi_y = cut(
+          bi_y = .bincode(
             get(input$y),
             breaks = bins_y,
-            include.lowest = TRUE,
-            labels = c("1", "2", "3")
+            include.lowest = TRUE
           )
         )
       out_scat <- out_scat |>
@@ -736,7 +729,7 @@ server <- function(input, output, session) {
       # cut into groups defined above
       out_scat <- d() |>
         mutate(
-          bi_x = cut(get(input$x), breaks = bins_x, include.lowest = TRUE)
+          bi_x = .bincode(get(input$x), breaks = bins_x, include.lowest = TRUE)
         ) |>
         mutate(x_class = paste0(as.numeric(bi_x)))
 
@@ -878,11 +871,19 @@ server <- function(input, output, session) {
         # cut into groups defined above
         out <- d() |>
           mutate(
-            bi_x = cut(get(input$x), breaks = bins_x, include.lowest = TRUE)
+            bi_x = .bincode(
+              get(input$x),
+              breaks = bins_x,
+              include.lowest = TRUE
+            )
           )
         out <- out |>
           mutate(
-            bi_y = cut(get(input$y), breaks = bins_y, include.lowest = TRUE)
+            bi_y = .bincode(
+              get(input$y),
+              breaks = bins_y,
+              include.lowest = TRUE
+            )
           )
         out <- out |>
           mutate(bi_class = paste0(as.numeric(bi_x), "-", as.numeric(bi_y)))
@@ -976,7 +977,11 @@ server <- function(input, output, session) {
         # cut into groups defined above
         out <- d() |>
           mutate(
-            bi_x = cut(get(input$x), breaks = bins_x, include.lowest = TRUE)
+            bi_x = .bincode(
+              get(input$x),
+              breaks = bins_x,
+              include.lowest = TRUE
+            )
           ) |>
           mutate(x_class = paste0(as.numeric(bi_x)))
 
@@ -1087,20 +1092,18 @@ server <- function(input, output, session) {
           # cut into groups defined above
           out_scat <- d() |>
             mutate(
-              bi_x = cut(
+              bi_x = .bincode(
                 get(input$x),
                 breaks = bins_x,
-                include.lowest = TRUE,
-                labels = c("1", "2", "3")
+                include.lowest = TRUE
               )
             )
           out_scat <- out_scat |>
             mutate(
-              bi_y = cut(
+              bi_y = .bincode(
                 get(input$y),
                 breaks = bins_y,
-                include.lowest = TRUE,
-                labels = c("1", "2", "3")
+                include.lowest = TRUE
               )
             )
           out_scat <- out_scat |>
@@ -1298,7 +1301,11 @@ server <- function(input, output, session) {
           # cut into groups defined above
           out_scat <- d() |>
             mutate(
-              bi_x = cut(get(input$x), breaks = bins_x, include.lowest = TRUE)
+              bi_x = .bincode(
+                get(input$x),
+                breaks = bins_x,
+                include.lowest = TRUE
+              )
             ) |>
             mutate(x_class = paste0(as.numeric(bi_x)))
 
