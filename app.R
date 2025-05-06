@@ -64,9 +64,11 @@ dpkgs <-
       st_drop_geometry() |>
       tibble::as_tibble(),
     crime = get_codec_dpkg("xx_address-v0.2.0") |>
-      slice_max(year, by = census_tract_id_2010) |>
-      slice_max(month, by = census_tract_id_2010) |>
-      select(-year, -month)
+      filter(year == 2022) |>
+      summarize(
+        across(c(property, violent, other, gunshots, reported_shootings), sum),
+        .by = census_tract_id_2010
+      )
   )
 
 tracts_sf <- cincy::tract_tigris_2010
