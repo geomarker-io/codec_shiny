@@ -63,7 +63,7 @@ dpkgs <-
       interpolate(cincy::tract_tigris_2010) |>
       st_drop_geometry() |>
       tibble::as_tibble(),
-    crime = get_codec_dpkg("xx_address-v0.2.0") |>
+    crime = get_codec_dpkg("xx_address-v0.2.1") |>
       filter(year == 2022) |>
       summarize(
         across(c(property, violent, other, gunshots, reported_shootings), sum),

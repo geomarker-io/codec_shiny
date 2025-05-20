@@ -1,0 +1,10 @@
+name: codec_shiny
+title:
+username: grapph
+account: grapph
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 10484028
+bundleId: 10246226
+url: https://grapph.shinyapps.io/codec_shiny/
+version: 1
