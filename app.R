@@ -1,90 +1,28 @@
-library(codec)
-library(fr)
+# ---- Packages ----
 library(shiny)
-library(cincy)
+library(shinyWidgets)
 library(bslib)
 library(ggiraph)
 library(tidyverse)
-library(biscale)
-library(cowplot)
-library(ggExtra)
-library(shinyWidgets)
-library(leaflet)
 library(sf)
-library(codec)
+library(leaflet)
+library(cowplot)
+library(biscale)
+library(cincy)
+library(codec) # pak::pak("geomarker-io/codec@pins")
+library(shinyjs)
 
-dpkgs <-
-  list(
-    environmental_justice_index = get_codec_dpkg(
-      "environmental_justice_index-v0.1.0"
-    ) |>
-      select(-year),
-    hh_acs_measures = get_codec_dpkg("acs_measures-v0.1.0") |>
-      dplyr::left_join(cincy::tract_tigris_2020, by = "census_tract_id_2020") |>
-      st_as_sf() |>
-      interpolate(cincy::tract_tigris_2010) |>
-      st_drop_geometry() |>
-      tibble::as_tibble() |>
-      select(-year),
-    drivetime = get_codec_dpkg("drivetime-v0.2.2") |>
-      select(-year),
-    green = get_codec_dpkg("green-v0.1.0") |>
-      dplyr::left_join(cincy::tract_tigris_2020, by = "census_tract_id_2020") |>
-      st_as_sf() |>
-      interpolate(cincy::tract_tigris_2010) |>
-      st_drop_geometry() |>
-      tibble::as_tibble() |>
-      select(-year),
-    parcel = get_codec_dpkg("parcel-v0.1.1") |>
-      select(-year),
-    traffic = get_codec_dpkg("traffic-v0.1.2") |>
-      dplyr::left_join(cincy::tract_tigris_2020, by = "census_tract_id_2020") |>
-      st_as_sf() |>
-      interpolate(cincy::tract_tigris_2010) |>
-      st_drop_geometry() |>
-      tibble::as_tibble() |>
-      select(-year),
-    property_code_enforcements = get_codec_dpkg(
-      "property_code_enforcements-v0.2.0"
-    ) |>
-      slice_max(year, by = census_tract_id_2010) |>
-      slice_max(month, by = census_tract_id_2010) |>
-      select(-year, -month) |>
-      rename(n_property_violations = n_violations),
-    voter_participation = get_codec_dpkg("voter_participation-v0.2.0") |>
-      mutate(
-        census_tract_id_2020,
-        year,
-        voter_participation_rate = `2023 General Election`,
-        .keep = "none"
-      ) |>
-      dplyr::left_join(cincy::tract_tigris_2020, by = "census_tract_id_2020") |>
-      st_as_sf() |>
-      interpolate(cincy::tract_tigris_2010) |>
-      st_drop_geometry() |>
-      tibble::as_tibble(),
-    crime = get_codec_dpkg("xx_address-v0.2.1") |>
-      filter(year == 2022) |>
-      summarize(
-        across(c(property, violent, other, gunshots, reported_shootings), sum),
-        .by = census_tract_id_2010
-      )
-  )
+# ---- Data & Variables ----
+d_codec <- codec:::codec_latest_annual |>
+  left_join(cincy::tract_tigris_2020, by = "census_tract_id_2020") |>
+  st_as_sf()
 
-tracts_sf <- cincy::tract_tigris_2010
+d_vars <- set_names(
+  setdiff(names(d_codec), c("census_tract_id_2020", "year", "geometry")),
+  ~ str_to_title(str_replace_all(.x, "_", " "))
+)
 
-d_all <-
-  purrr::reduce(
-    dpkgs,
-    dplyr::left_join,
-    by = "census_tract_id_2010",
-    .init = tracts_sf
-  ) |>
-  tibble::as_tibble() |>
-  st_as_sf() |>
-  st_transform(st_crs(4326))
-
-# fmt: skip
+# ---- Palettes ----
 codec_bi_pal <- c(
   "1-1" = "#eddcc1",
   "2-1" = "#d4aa92",
@@ -97,21 +35,6 @@ codec_bi_pal <- c(
   "3-3" = "#2b3135"
 )
 
-# fmt: skip
-codec_bi_pal_2 <- 
-  tibble::tribble(
-    ~group, ~fill,
-    "1-1", "#eddcc1",
-    "2-1", "#d4aa92",
-    "3-1", "#bb7964",
-    "1-2", "#909992",
-    "2-2", "#81766f",
-    "3-2", "#71544c",
-    "1-3", "#375a66",
-    "2-3", "#31464d",
-    "3-3", "#2b3135"
-)
-
 uni_colors <- c(
   codec_colors()[1],
   "#567D91",
@@ -121,84 +44,125 @@ uni_colors <- c(
   "#F6EDDE"
 )
 
-## ----
+make_pal <- function(palette, var, levels) {
+  colorFactor(palette, factor(var, levels = levels))
+}
 
-geography_selector <-
-  selectInput(
-    inputId = "sel_geo",
-    label = actionBttn(
-      inputId = "geography_sel_label",
-      style = "simple",
-      size = "sm",
-      block = FALSE,
-      label = a(
-        "Geography",
-        href = "https://geomarker.io/cincy/articles/geographies.html",
-        target = "_blank"
+# ---- Binning helpers ----
+qbreaks <- function(v, n) {
+  classInt::classIntervals(v, n, style = "quantile")$brks
+}
+
+make_bins <- function(d, x, y = NULL) {
+  if (is.null(y)) {
+    list(qbreaks(d[[x]], 6))
+  } else {
+    list(qbreaks(d[[x]], 3), qbreaks(d[[y]], 3))
+  }
+}
+
+# ---- Rectangles for background panels ----
+make_rectangles <- function(bins, type = c("uni", "bi")) {
+  type <- match.arg(type)
+  if (type == "bi") {
+    expand.grid(x = 1:3, y = 1:3) |>
+      mutate(
+        xmin = c(-Inf, bins[[1]])[x + 1],
+        xmax = c(bins[[1]], Inf)[x + 1],
+        ymin = c(-Inf, bins[[2]])[y + 1],
+        ymax = c(bins[[2]], Inf)[y + 1],
+        fill = codec_bi_pal[(y - 1) * 3 + x]
       )
-    ) |>
-      tagAppendAttributes(style = "color: #C28273; background-color: #FFFFFF;"),
-    choices = c(
-      "census tract" = "tract",
-      "ZCTA" = "zcta",
-      "neighborhood" = "neighborhood"
-    ),
-    selected = "tract",
-    width = "100%"
-  )
+  } else {
+    tibble(
+      xmin = c(-Inf, bins[[1]][-1]),
+      xmax = c(bins[[1]][-1], Inf),
+      fill = uni_colors
+    )
+  }
+}
 
-selector_codec_dpkgs <-
-  selectInput(
-    inputId = "sel_dpkgs",
-    ## label = NULL,
-    label = "CoDEC Data Packages",
-    choices = setNames(
-      names(dpkgs),
-      c(
-        "Environmental Justice Index",
-        "Harmonized Historical ACS Measures",
-        "Drivetime",
-        "Green",
-        "Parcel",
-        "Traffic",
-        "Property Code Enforcements",
-        "Voter Participation",
-        "Crime"
-      )
-    ),
-    selected = c("hh_acs_measures"),
-    multiple = TRUE,
-    selectize = TRUE
+# ---- Girafe size wrapper ----
+make_girafe <- function(p, input) {
+  girafe(
+    ggobj = p,
+    width_svg = if (input$side_plot_selector == "main_map") 3 else 6,
+    height_svg = if (input$side_plot_selector == "main_map") 3 else 6,
+    options = list(
+      opts_sizing(width = 1, rescale = TRUE),
+      opts_selection(type = "single")
+    )
   )
+}
 
-button_help_bivariate <-
-  actionBttn(
-    "legend_modal",
-    style = "simple",
-    label = "Bivariate",
-    size = "sm",
-    block = FALSE,
-    icon = icon("question-circle")
-  ) |>
+# ---- Base map ----
+base_map <- leaflet() |>
+  setView(-84.55, 39.18, zoom = 10.5) |>
+  addProviderTiles(providers$CartoDB.Positron) |>
+  removeLayersControl()
+
+# ---- UI bits ----
+make_picker <- function(id, label, choices, selected) {
+  shinyWidgets::pickerInput(
+    inputId = id,
+    label = label,
+    choices = choices,
+    selected = selected,
+    multiple = FALSE,
+    inline = TRUE,
+    width = "fit",
+    options = pickerOptions(liveSearch = TRUE)
+  )
+}
+
+button_help_bivariate <- actionBttn(
+  "legend_modal",
+  style = "simple",
+  label = "Bivariate",
+  size = "sm",
+  block = FALSE,
+  icon = icon("question-circle")
+) |>
   tagAppendAttributes(style = "color: #C28273; background-color: #FFFFFF;")
 
-switch_plots <-
-  selectInput(
-    "side_plot_selector",
-    label = "Focus",
-    choices = c("map" = "main_map", "scatterplot" = "main_scatterplot"),
-    selected = "main_map",
-    width = "25%"
-  )
+geography_selector <- selectInput(
+  inputId = "sel_geo",
+  label = actionBttn(
+    inputId = "geography_sel_label",
+    style = "simple",
+    size = "sm",
+    block = FALSE,
+    label = a(
+      "Geography",
+      href = "https://geomarker.io/cincy/articles/geographies.html",
+      target = "_blank"
+    )
+  ) |>
+    tagAppendAttributes(style = "color: #C28273; background-color: #FFFFFF;"),
+  choices = c(
+    "census tract" = "tract",
+    "ZCTA" = "zcta",
+    "neighborhood" = "neighborhood"
+  ),
+  selected = "tract",
+  width = "100%"
+)
 
-selector_view <-
-  selectInput(
-    inputId = "view_method",
-    label = button_help_bivariate,
-    choices = c("univariate" = "univariate", "bivariate" = "bivariate"),
-    selected = "bivariate",
-    width = "100%"
-  )
+switch_plots <- selectInput(
+  "side_plot_selector",
+  label = "Focus",
+  choices = c("map" = "main_map", "scatterplot" = "main_scatterplot"),
+  selected = "main_map",
+  width = "25%"
+)
+
+selector_view <- selectInput(
+  inputId = "view_method",
+  label = button_help_bivariate,
+  choices = c("univariate" = "univariate", "bivariate" = "bivariate"),
+  selected = "bivariate",
+  width = "100%"
+)
 
 ex_card <- card(
   card_header(
@@ -211,7 +175,6 @@ ex_card <- card(
     layout_column_wrap(
       width = 1 / 2,
       height = 80,
-
       p(
         br(),
         a(
@@ -222,7 +185,6 @@ ex_card <- card(
         br(),
         paste0("CoDEC version ", packageVersion("codec"))
       ),
-
       layout_column_wrap(
         width = 1 / 2,
         height = 75,
@@ -235,29 +197,25 @@ ex_card <- card(
   layout_sidebar(
     fillable = TRUE,
     sidebar = sidebar(
-      selector_codec_dpkgs,
       uiOutput("x_sel"),
       uiOutput("y_sel"),
       switch_plots,
       conditionalPanel(
-        condition = "input.side_plot_selector == 'main_map'",
+        "input.side_plot_selector == 'main_map'",
         girafeOutput("side_scatter")
       ),
       conditionalPanel(
-        condition = "input.side_plot_selector == 'main_scatterplot'",
+        "input.side_plot_selector == 'main_scatterplot'",
         leafletOutput("side_map", height = "50vh")
       ),
-      #uiOutput("sidebar_plot"),
       width = "30%"
     ),
-    #uiOutput("main_plot"),
-
     conditionalPanel(
-      condition = "input.side_plot_selector == 'main_map'",
+      "input.side_plot_selector == 'main_map'",
       leafletOutput("big_map", height = "80vh")
     ),
     conditionalPanel(
-      condition = "input.side_plot_selector == 'main_scatterplot'",
+      "input.side_plot_selector == 'main_scatterplot'",
       girafeOutput("big_scatter", height = "78%", width = "78%")
     ),
     uiOutput("clear_button_panel")
@@ -267,39 +225,21 @@ ex_card <- card(
 ui <- page_fillable(
   theme = bs_theme(
     version = 5,
-    "bg" = "#FFFFFF",
-    "fg" = "#396175",
-    "primary" = "#C28273",
+    bg = "#FFFFFF",
+    fg = "#396175",
+    primary = "#C28273",
     "grid-gutter-width" = "0.0rem",
     "border-radius" = "0.5rem",
     "btn-border-radius" = "0.25rem"
   ),
-  tags$head(
-    tags$style(type = "text/css", "text {font-family: sans-serif}")
-  ),
+  tags$head(tags$style(type = "text/css", "text {font-family: sans-serif}")),
   shinyjs::useShinyjs(),
   ex_card
 )
 
+# ---- Server ----
 server <- function(input, output, session) {
-  d <- reactive({
-    if (input$sel_geo == "zcta") {
-      d <- d_all |>
-        cincy::interpolate(to = cincy::zcta_tigris_2010)
-    } else if (input$sel_geo == "neighborhood") {
-      d <- d_all |>
-        cincy::interpolate(to = cincy::neigh_cchmc_2010)
-    } else {
-      d <- d_all
-    }
-
-    d <-
-      d |>
-      dplyr::rename("geo_index" = 1) |>
-      sf::st_as_sf() |>
-      sf::st_transform(crs = sf::st_crs(d_all))
-  })
-
+  # enable/disable Y picker
   observeEvent(input$view_method, {
     if (input$view_method == "univariate") {
       shinyjs::disable("y_sel")
@@ -308,1164 +248,287 @@ server <- function(input, output, session) {
     }
   })
 
-  d_sel_dpkgs <- reactive({
-    dpkgs[input$sel_dpkgs]
+  # pickers
+  output$x_sel <- renderUI(make_picker("x", "X:", d_vars, "prop_poverty"))
+  output$y_sel <- renderUI(make_picker("y", "Y:", d_vars, "median_home_value"))
+
+  # current geography
+  d_geo <- reactive({
+    req(input$x)
+    g <- switch(
+      input$sel_geo,
+      zcta = cincy::zcta_tigris_2020,
+      neighborhood = cincy::neigh_cchmc_2020,
+      tract = NULL
+    )
+    dat <- if (is.null(g)) d_codec else d_codec |> cincy::interpolate(to = g)
+    dat |> dplyr::rename(geo_index = 1) |> st_transform(4326)
   })
 
-  d_avail_vars <- reactive({
-    if (is.null(input$sel_dpkgs)) {
-      sendSweetAlert(
-        session = session,
-        title = "No Selection",
-        text = "Please select at least one data package",
-        type = "warning"
-      )
+  # bins
+  bins <- reactive({
+    if (input$view_method == "univariate") {
+      make_bins(d_geo(), input$x)
     } else {
-      vars <- unlist(purrr::map(d_sel_dpkgs(), colnames))
-
-      vars <- vars[!vars %in% c("census_tract_id_2010", "year")]
-
-      named_vars <- set_names(
-        vars,
-        str_to_title(str_replace_all(vars, "_", " "))
-      )
-
-      d_avail_vars <- named_vars
+      make_bins(d_geo(), input$x, input$y)
     }
   })
 
-  output$x_sel <- renderUI({
-    shinyWidgets::pickerInput(
-      inputId = "x",
-      label = "X: ",
-      choices = d_avail_vars(),
-      multiple = FALSE,
-      inline = TRUE,
-      width = "fit",
-      selected = "prop_poverty",
-      options = pickerOptions(
-        liveSearch = TRUE
+  # prepared data + labels
+  d_ready <- reactive({
+    if (input$view_method == "univariate") {
+      bx <- .bincode(
+        d_geo()[[input$x]],
+        breaks = bins()[[1]],
+        include.lowest = TRUE
       )
-    )
-  })
-
-  output$y_sel <- renderUI({
-    shinyWidgets::pickerInput(
-      inputId = "y",
-      label = "Y: ",
-      choices = d_avail_vars(),
-      multiple = FALSE,
-      inline = TRUE,
-      width = "fit",
-      selected = "median_home_value",
-      options = pickerOptions(
-        liveSearch = TRUE
-      )
-    )
-  })
-
-  observeEvent(input$select_all, {
-    updateCheckboxGroupInput(inputId = "sel_dpkgs", selected = names(dpkgs))
-  })
-
-  observeEvent(input$deselect_all, {
-    updateCheckboxGroupInput(inputId = "sel_dpkgs", selected = "")
-  })
-
-  map_ready <- renderLeaflet({
-    req(input$x)
-
-    if (input$view_method == "bivariate") {
-      bins_x <- pull(d(), input$x)
-      bins_y <- pull(d(), input$y)
-
-      bins_x <- classInt::classIntervals(bins_x, n = 3, style = "quantile")
-      bins_y <- classInt::classIntervals(bins_y, n = 3, style = "quantile")
-
-      bins_x <- bins_x$brks
-      bins_y <- bins_y$brks
-
-      # cut into groups defined above
-      out <- d() |>
+      d_geo() |>
         mutate(
-          bi_x = .bincode(get(input$x), breaks = bins_x, include.lowest = TRUE)
-        )
-      out <- out |>
-        mutate(
-          bi_y = .bincode(get(input$y), breaks = bins_y, include.lowest = TRUE)
-        )
-      out <- out |>
-        mutate(bi_class = paste0(as.numeric(bi_x), "-", as.numeric(bi_y)))
-
-      out <- out |>
-        mutate(
-          out_lab = paste(
+          x_class = as.character(as.numeric(bx)),
+          out_lab = paste0(
             geo_index,
             "<br>",
             input$x,
             ": ",
-            round(get(input$x), 2),
+            round(.data[[input$x]], 2)
+          )
+        )
+    } else {
+      bx <- .bincode(
+        d_geo()[[input$x]],
+        breaks = bins()[[1]],
+        include.lowest = TRUE
+      )
+      by <- .bincode(
+        d_geo()[[input$y]],
+        breaks = bins()[[2]],
+        include.lowest = TRUE
+      )
+      d_geo() |>
+        mutate(
+          bi_class = paste0(as.numeric(bx), "-", as.numeric(by)),
+          out_lab = paste0(
+            geo_index,
+            "<br>",
+            input$x,
+            ": ",
+            round(.data[[input$x]], 2),
             "<br>",
             input$y,
             ": ",
-            round(get(input$y), 2)
+            round(.data[[input$y]], 2)
           )
         )
-
-      pal <- colorFactor(
-        codec_bi_pal,
-        factor(
-          out$bi_class,
-          levels = c(
-            "1-1",
-            "2-1",
-            "3-1",
-            "1-2",
-            "2-2",
-            "3-2",
-            "1-3",
-            "2-3",
-            "3-3"
-          )
-        )
-      )
-
-      out <- sf::st_transform(out, crs = sf::st_crs(d()))
-
-      map <-
-        leaflet(out) |>
-        setView(
-          -84.55,
-          39.18,
-          zoom = if (input$side_plot_selector == "main_map") {
-            11.5
-          } else {
-            10
-          }
-        ) |>
-        addProviderTiles(provider = providers$CartoDB.Positron) |>
-        addPolygons(
-          fillColor = ~ pal(bi_class),
-          fillOpacity = 0.7,
-          stroke = T,
-          label = ~ lapply(out$out_lab, HTML),
-          weight = .5,
-          color = "#333333"
-        ) |>
-        removeLayersControl()
-
-      map
-    } else {
-      bins_x <- pull(d(), input$x)
-
-      bins_x <- classInt::classIntervals(bins_x, n = 6, style = "quantile")
-
-      bins_x <- bins_x$brks
-
-      # cut into groups defined above
-      out <- d() |>
-        mutate(
-          bi_x = .bincode(get(input$x), breaks = bins_x, include.lowest = TRUE)
-        ) |>
-        mutate(x_class = paste0(as.numeric(bi_x)))
-
-      out <- out |>
-        mutate(
-          out_lab = paste(
-            geo_index,
-            "<br>",
-            input$x,
-            ": ",
-            round(get(input$x), 2)
-          )
-        )
-
-      pal <- colorFactor(
-        uni_colors,
-        factor(
-          out$x_class,
-          levels = c(
-            "1",
-            "2",
-            "3",
-            "4",
-            "5",
-            "6"
-          )
-        )
-      )
-
-      out <- sf::st_transform(out, crs = sf::st_crs(d()))
-
-      map <-
-        leaflet(out) |>
-        setView(
-          -84.55,
-          39.18,
-          zoom = if (input$side_plot_selector == "main_map") {
-            11.5
-          } else {
-            10
-          }
-        ) |>
-        addProviderTiles(provider = providers$CartoDB.Positron) |>
-        addPolygons(
-          fillColor = ~ pal(x_class),
-          fillOpacity = 0.7,
-          stroke = T,
-          label = ~ lapply(out$out_lab, HTML),
-          weight = .5,
-          color = "#333333"
-        ) |>
-        removeLayersControl()
-
-      map
     }
   })
 
-  scatter_ready <- renderGirafe({
-    req(input$x)
+  # selection state
+  selected_id <- reactiveVal(NULL)
 
+  # maps ----
+  build_map <- reactive({
+    req(d_ready())
+    if (input$view_method == "univariate") {
+      pal <- make_pal(uni_colors, d_ready()$x_class, levels = as.character(1:6))
+      m <- base_map |>
+        addPolygons(
+          data = d_ready(),
+          fillColor = ~ pal(x_class),
+          fillOpacity = 0.7,
+          stroke = TRUE,
+          label = ~ lapply(out_lab, HTML),
+          weight = .5,
+          color = "#333333"
+        )
+    } else {
+      pal <- make_pal(
+        codec_bi_pal,
+        d_ready()$bi_class,
+        levels = c(
+          "1-1",
+          "2-1",
+          "3-1",
+          "1-2",
+          "2-2",
+          "3-2",
+          "1-3",
+          "2-3",
+          "3-3"
+        )
+      )
+      m <- base_map |>
+        addPolygons(
+          data = d_ready(),
+          fillColor = ~ pal(bi_class),
+          fillOpacity = 0.7,
+          stroke = TRUE,
+          label = ~ lapply(out_lab, HTML),
+          weight = .5,
+          color = "#333333"
+        )
+    }
+
+    # highlight selection if any
+    sid <- selected_id()
+    if (!is.null(sid) && sid %in% d_ready()$geo_index) {
+      m <- m |>
+        addPolygons(
+          data = d_ready() |> filter(geo_index == sid),
+          color = "#FFFFFF",
+          weight = 5,
+          opacity = 1,
+          fillOpacity = 0
+        )
+    }
+    m
+  })
+
+  output$big_map <- renderLeaflet(build_map())
+  output$side_map <- renderLeaflet(build_map())
+
+  # scatter ----
+  make_bi_scatter <- function(dr, x, y, rects) {
+    ggplot() +
+      geom_rect(
+        data = rects,
+        aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = fill),
+        inherit.aes = FALSE,
+        alpha = 1
+      ) +
+      scale_fill_identity() +
+      geom_point_interactive(
+        data = dr,
+        aes_string(x = x, y = y, data_id = "geo_index"),
+        fill = codec_colors()[7],
+        alpha = .8,
+        shape = 21,
+        color = "grey20",
+        stroke = .5
+      ) +
+      theme_light() +
+      theme(
+        aspect.ratio = 1,
+        title = element_text(size = 8),
+        axis.title = element_text(
+          size = if (input$side_plot_selector == "main_map") 6 else 10
+        ),
+        legend.key.size = unit(3, "mm")
+      ) +
+      labs(x = x, y = y)
+  }
+
+  make_uni_hist <- function(dr, x, rects) {
+    ggplot(dr, aes_string(x = x)) +
+      geom_rect(
+        data = rects,
+        aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = fill),
+        inherit.aes = FALSE,
+        alpha = 1
+      ) +
+      geom_histogram_interactive(
+        aes(tooltip = geo_index, data_id = geo_index),
+        bins = 20,
+        alpha = .6,
+        fill = "grey70",
+        color = "grey50"
+      ) +
+      theme_light() +
+      theme(
+        aspect.ratio = 1,
+        title = element_text(size = 8),
+        axis.title = element_text(
+          size = if (input$side_plot_selector == "main_map") 6 else 10
+        ),
+        legend.key.size = unit(3, "mm")
+      ) +
+      labs(x = x, y = "")
+  }
+
+  scatter_girafe <- reactive({
+    req(input$x, d_ready())
     if (input$view_method == "bivariate") {
-      bins_x <- pull(d(), input$x)
-      bins_y <- pull(d(), input$y)
-
-      bins_x <- classInt::classIntervals(bins_x, n = 3, style = "quantile")
-      bins_y <- classInt::classIntervals(bins_y, n = 3, style = "quantile")
-
-      bins_x <- bins_x$brks
-      bins_y <- bins_y$brks
-
-      # cut into groups defined above
-      out_scat <- d() |>
-        mutate(
-          bi_x = .bincode(
-            get(input$x),
-            breaks = bins_x,
-            include.lowest = TRUE
-          )
-        )
-      out_scat <- out_scat |>
-        mutate(
-          bi_y = .bincode(
-            get(input$y),
-            breaks = bins_y,
-            include.lowest = TRUE
-          )
-        )
-      out_scat <- out_scat |>
-        mutate(bi_class = paste0(as.numeric(bi_x), "-", as.numeric(bi_y)))
-
-      scatter_panels <- ggplot(out_scat, aes_string(x = input$x, y = input$y)) + #$x, y = input$y)) +
-        annotate(
-          "rect",
-          xmin = -Inf,
-          xmax = bins_x[2],
-          ymin = -Inf,
-          ymax = bins_y[2],
-          alpha = 1,
-          fill = codec_bi_pal[1]
-        ) +
-        annotate(
-          "rect",
-          xmin = -Inf,
-          xmax = bins_x[2],
-          ymin = bins_y[2],
-          ymax = bins_y[3],
-          alpha = 1,
-          fill = codec_bi_pal[4]
-        ) +
-        annotate(
-          "rect",
-          xmin = -Inf,
-          xmax = bins_x[2],
-          ymin = bins_y[3],
-          ymax = Inf,
-          alpha = 1,
-          fill = codec_bi_pal[7]
-        ) +
-        annotate(
-          "rect",
-          xmin = bins_x[2],
-          xmax = bins_x[3],
-          ymin = -Inf,
-          ymax = bins_y[2],
-          alpha = 1,
-          fill = codec_bi_pal[2]
-        ) +
-        annotate(
-          "rect",
-          xmin = bins_x[2],
-          xmax = bins_x[3],
-          ymin = bins_y[2],
-          ymax = bins_y[3],
-          alpha = 1,
-          fill = codec_bi_pal[5]
-        ) +
-        annotate(
-          "rect",
-          xmin = bins_x[2],
-          xmax = bins_x[3],
-          ymin = bins_y[3],
-          ymax = Inf,
-          alpha = 1,
-          fill = codec_bi_pal[8]
-        ) +
-        annotate(
-          "rect",
-          xmin = bins_x[3],
-          xmax = Inf,
-          ymin = -Inf,
-          ymax = bins_y[2],
-          alpha = 1,
-          fill = codec_bi_pal[3]
-        ) +
-        annotate(
-          "rect",
-          xmin = bins_x[3],
-          xmax = Inf,
-          ymin = bins_y[2],
-          ymax = bins_y[3],
-          alpha = 1,
-          fill = codec_bi_pal[6]
-        ) +
-        annotate(
-          "rect",
-          xmin = bins_x[3],
-          xmax = Inf,
-          ymin = bins_y[3],
-          ymax = Inf,
-          alpha = 1,
-          fill = codec_bi_pal[9]
-        )
-
-      scat <- scatter_panels +
-        geom_point_interactive(
-          data = d(),
-          aes_string(
-            x = input$x,
-            y = input$y,
-            data_id = "geo_index"
-          ),
-          fill = codec_colors()[7],
-          alpha = .8,
-          shape = 21,
-          color = "grey20",
-          stroke = .5
-        ) +
-        theme_light() +
-        theme(
-          aspect.ratio = 1,
-          title = element_text(size = 8),
-          axis.title = element_text(
-            size = if (input$side_plot_selector == "main_map") {
-              6
-            } else {
-              10
-            }
-          ),
-          legend.key.size = unit(3, "mm")
-        ) +
-        labs(x = paste0(input$x), y = paste0(input$y))
-
-      hist1 <- ggplot(d()) +
+      rects <- make_rectangles(bins(), "bi")
+      base <- make_bi_scatter(d_ready(), input$x, input$y, rects)
+      h1 <- ggplot(d_ready()) +
         geom_histogram_interactive(
-          aes_string(
-            x = input$x,
-            tooltip = "geo_index",
-            data_id = "geo_index"
-          ),
-          fill = codec_colors()[2],
+          aes_string(x = input$x, tooltip = "geo_index", data_id = "geo_index"),
           bins = 20,
+          fill = codec_colors()[2],
           color = codec_colors()[3]
         ) +
         theme_minimal()
-
-      hist2 <- ggplot(d()) +
+      h2 <- ggplot(d_ready()) +
         geom_histogram_interactive(
-          aes_string(
-            x = input$y,
-            tooltip = "geo_index",
-            data_id = "geo_index"
-          ),
-          fill = codec_colors()[2],
+          aes_string(x = input$y, tooltip = "geo_index", data_id = "geo_index"),
           bins = 20,
+          fill = codec_colors()[2],
           color = codec_colors()[3]
         ) +
         coord_flip() +
         theme_minimal()
-
-      scat1 <- insert_xaxis_grob(scat, hist1, position = "bottom")
-      scat2 <- insert_yaxis_grob(scat1, hist2, position = "right")
-
-      finalScat <- ggdraw() +
-        draw_plot(scat2) + # , 0, 0, 1, 1, vjust = -.2)
-        theme(plot.margin = margin(0, 0, 0, 0)) #
-
-      gir_join <- girafe(
-        ggobj = finalScat,
-        width_svg = if (input$side_plot_selector == "main_map") {
-          3
-        } else {
-          6
-        },
-        height_svg = if (input$side_plot_selector == "main_map") {
-          3
-        } else {
-          6
-        },
-        options = list(
-          opts_sizing(width = 1, rescale = T),
-          opts_selection(type = "single")
-        )
+      p <- base |>
+        insert_xaxis_grob(h1, position = "bottom") |>
+        insert_yaxis_grob(h2, position = "right")
+      make_girafe(
+        ggdraw() + draw_plot(p) + theme(plot.margin = margin(0, 0, 0, 0)),
+        input
       )
-
-      gir_join
     } else {
-      bins_x <- pull(d(), input$x)
-
-      bins_x <- classInt::classIntervals(bins_x, n = 6, style = "quantile")
-
-      bins_x <- bins_x$brks
-
-      # cut into groups defined above
-      out_scat <- d() |>
-        mutate(
-          bi_x = .bincode(get(input$x), breaks = bins_x, include.lowest = TRUE)
-        ) |>
-        mutate(x_class = paste0(as.numeric(bi_x)))
-
-      scatter_panels <- ggplot(out_scat, aes_string(x = input$x)) +
-        annotate(
-          "rect",
-          xmin = -Inf,
-          xmax = bins_x[2],
-          ymin = -Inf,
-          ymax = Inf,
-          alpha = 1,
-          fill = codec_colors()[1]
-        ) +
-        annotate(
-          "rect",
-          xmin = bins_x[2],
-          xmax = bins_x[3],
-          ymin = -Inf,
-          ymax = Inf,
-          alpha = 1,
-          fill = "#567D91"
-        ) +
-        annotate(
-          "rect",
-          xmin = bins_x[3],
-          xmax = bins_x[4],
-          ymin = -Inf,
-          ymax = Inf,
-          alpha = 1,
-          fill = "#789BAC"
-        ) +
-        annotate(
-          "rect",
-          xmin = bins_x[4],
-          xmax = bins_x[5],
-          ymin = -Inf,
-          ymax = Inf,
-          alpha = 1,
-          fill = "#9FBAC8"
-        ) +
-        annotate(
-          "rect",
-          xmin = bins_x[5],
-          xmax = bins_x[6],
-          ymin = -Inf,
-          ymax = Inf,
-          alpha = 1,
-          fill = "#CCDCE3"
-        ) +
-        annotate(
-          "rect",
-          xmin = bins_x[6],
-          xmax = Inf,
-          ymin = -Inf,
-          ymax = Inf,
-          alpha = 1,
-          fill = "#F6EDDE"
-        )
-
-      scat <- scatter_panels +
-        geom_histogram_interactive(
-          d(),
-          mapping = aes_string(
-            x = input$x,
-            tooltip = "geo_index",
-            data_id = "geo_index"
-          ),
-          bins = 20,
-          alpha = .6,
-          fill = "grey70",
-          color = "grey50"
-        ) +
-        theme_light() +
-        theme(
-          aspect.ratio = 1,
-          title = element_text(size = 8),
-          axis.title = element_text(
-            size = if (input$side_plot_selector == "main_map") {
-              6
-            } else {
-              10
-            }
-          ),
-          legend.key.size = unit(3, "mm")
-        ) +
-        labs(x = paste0(input$x), y = "")
-
-      gir_join <- girafe(
-        ggobj = scat,
-        width_svg = if (input$side_plot_selector == "main_map") {
-          3
-        } else {
-          6
-        },
-        height_svg = if (input$side_plot_selector == "main_map") {
-          3
-        } else {
-          6
-        },
-        options = list(
-          opts_sizing(width = 1, rescale = T),
-          opts_selection(type = "single")
-        )
-      )
-
-      gir_join
+      rects <- make_rectangles(bins(), "uni")
+      p <- make_uni_hist(d_ready(), input$x, rects)
+      make_girafe(p, input)
     }
   })
 
-  d_scat_click <- reactiveVal()
-  scat_click <- reactiveVal()
-  # listen_for_click <- reactive({
-  #   list(input$side_scatter_selected, input$big_scatter_selected)
-  # })
+  output$big_scatter <- renderGirafe(scatter_girafe())
+  output$side_scatter <- renderGirafe(scatter_girafe())
 
+  # click/selection wiring ----
   observeEvent(
-    ignoreInit = TRUE,
     list(input$side_scatter_selected, input$big_scatter_selected),
     {
-      if (input$view_method == "bivariate") {
-        if (input$side_plot_selector == "main_map") {
-          scat_click <- input$side_scatter_selected
-        } else {
-          scat_click <- input$big_scatter_selected
-        }
-
-        d_scat_click <- d() |>
-          filter(geo_index == scat_click)
-
-        bins_x <- pull(d(), input$x)
-        bins_y <- pull(d(), input$y)
-
-        bins_x <- classInt::classIntervals(bins_x, n = 3, style = "quantile")
-        bins_y <- classInt::classIntervals(bins_y, n = 3, style = "quantile")
-
-        bins_x <- bins_x$brks
-        bins_y <- bins_y$brks
-
-        # cut into groups defined above
-        out <- d() |>
-          mutate(
-            bi_x = .bincode(
-              get(input$x),
-              breaks = bins_x,
-              include.lowest = TRUE
-            )
-          )
-        out <- out |>
-          mutate(
-            bi_y = .bincode(
-              get(input$y),
-              breaks = bins_y,
-              include.lowest = TRUE
-            )
-          )
-        out <- out |>
-          mutate(bi_class = paste0(as.numeric(bi_x), "-", as.numeric(bi_y)))
-
-        out <- out |>
-          mutate(
-            out_lab = paste(
-              geo_index,
-              "<br>",
-              input$x,
-              ": ",
-              round(get(input$x), 2),
-              "<br>",
-              input$y,
-              ": ",
-              round(get(input$y), 2)
-            )
-          )
-
-        pal <- colorFactor(
-          codec_bi_pal,
-          factor(
-            out$bi_class,
-            levels = c(
-              "1-1",
-              "2-1",
-              "3-1",
-              "1-2",
-              "2-2",
-              "3-2",
-              "1-3",
-              "2-3",
-              "3-3"
-            )
-          )
-        )
-
-        out <- sf::st_transform(out, crs = sf::st_crs(d()))
-        d_scat_click <- sf::st_transform(d_scat_click, crs = sf::st_crs(d()))
-
-        map <-
-          leafletProxy(
-            mapId = if (input$side_plot_selector == "main_map") {
-              "big_map"
-            } else {
-              "side_map"
-            },
-            data = out
-          ) |>
-          clearShapes() |>
-          setView(
-            -84.55,
-            39.18,
-            zoom = if (input$side_plot_selector == "main_map") {
-              11.5
-            } else {
-              10
-            }
-          ) |>
-          addProviderTiles(provider = providers$CartoDB.Positron) |>
-          addPolygons(
-            fillColor = ~ pal(bi_class),
-            fillOpacity = 0.7,
-            stroke = T,
-            label = ~ lapply(out$out_lab, HTML),
-            weight = .5,
-            color = "#333333"
-          ) |>
-          addPolygons(
-            data = d_scat_click,
-            color = "#FFFFFF",
-            stroke = T,
-            weight = 5,
-            opacity = 1
-          ) |>
-          removeLayersControl()
-
-        map
-      } else {
-        scat_click <- c(input$side_scatter_selected)
-
-        d_scat_click <- d() |>
-          filter(geo_index == scat_click)
-
-        bins_x <- pull(d(), input$x)
-
-        bins_x <- classInt::classIntervals(bins_x, n = 6, style = "quantile")
-
-        bins_x <- bins_x$brks
-
-        # cut into groups defined above
-        out <- d() |>
-          mutate(
-            bi_x = .bincode(
-              get(input$x),
-              breaks = bins_x,
-              include.lowest = TRUE
-            )
-          ) |>
-          mutate(x_class = paste0(as.numeric(bi_x)))
-
-        out <- out |>
-          mutate(
-            out_lab = paste(
-              geo_index,
-              "<br>",
-              input$x,
-              ": ",
-              round(get(input$x), 2)
-            )
-          )
-
-        pal <- colorFactor(
-          uni_colors,
-          factor(
-            out$x_class,
-            levels = c(
-              "1",
-              "2",
-              "3",
-              "4",
-              "5",
-              "6"
-            )
-          )
-        )
-
-        out <- sf::st_transform(out, crs = sf::st_crs(d()))
-        d_scat_click <- sf::st_transform(d_scat_click, crs = sf::st_crs(d()))
-
-        map <-
-          leafletProxy(
-            mapId = if (input$side_plot_selector == "main_map") {
-              "big_map"
-            } else {
-              "side_map"
-            },
-            data = out
-          ) |>
-          clearShapes() |>
-          setView(
-            -84.55,
-            39.18,
-            zoom = if (input$side_plot_selector == "main_map") {
-              11.5
-            } else {
-              10
-            }
-          ) |>
-          addProviderTiles(provider = providers$CartoDB.Positron) |>
-          addPolygons(
-            fillColor = ~ pal(x_class),
-            fillOpacity = 0.7,
-            stroke = T,
-            label = ~ lapply(out$out_lab, HTML),
-            weight = .5,
-            color = "#333333"
-          ) |>
-          addPolygons(
-            data = d_scat_click,
-            color = "#FFFFFF",
-            stroke = T,
-            weight = 5,
-            opacity = 1
-          ) |>
-          removeLayersControl()
-
-        map
-      }
-    }
+      sel <- input$side_scatter_selected %||% input$big_scatter_selected
+      if (!is.null(sel)) selected_id(sel)
+    },
+    ignoreInit = TRUE
   )
-
-  d_selected <- reactiveVal()
 
   observeEvent(
-    ignoreInit = TRUE,
     list(input$big_map_click, input$side_map_click),
     {
-      map_click <- reactiveVal()
-
-      if (input$side_plot_selector == "main_map") {
-        map_click <- input$big_map_click
-      } else {
-        map_click <- input$side_map_click
-      }
-
-      click <- tibble(lng = map_click$lng, lat = map_click$lat) |>
-        sf::st_as_sf(coords = c("lng", "lat"), crs = sf::st_crs(d()))
-
-      d_selected <- d() |>
-        sf::st_join(click, left = FALSE)
-
-      scatter_ready <- renderGirafe({
-        req(input$x)
-
-        if (input$view_method == "bivariate") {
-          bins_x <- pull(d(), input$x)
-          bins_y <- pull(d(), input$y)
-
-          bins_x <- classInt::classIntervals(bins_x, n = 3, style = "quantile")
-          bins_y <- classInt::classIntervals(bins_y, n = 3, style = "quantile")
-
-          bins_x <- bins_x$brks
-          bins_y <- bins_y$brks
-
-          # cut into groups defined above
-          out_scat <- d() |>
-            mutate(
-              bi_x = .bincode(
-                get(input$x),
-                breaks = bins_x,
-                include.lowest = TRUE
-              )
-            )
-          out_scat <- out_scat |>
-            mutate(
-              bi_y = .bincode(
-                get(input$y),
-                breaks = bins_y,
-                include.lowest = TRUE
-              )
-            )
-          out_scat <- out_scat |>
-            mutate(bi_class = paste0(as.numeric(bi_x), "-", as.numeric(bi_y)))
-
-          scatter_panels <- ggplot(
-            out_scat,
-            aes_string(x = input$x, y = input$y)
-          ) + #$x, y = input$y)) +
-            annotate(
-              "rect",
-              xmin = -Inf,
-              xmax = bins_x[2],
-              ymin = -Inf,
-              ymax = bins_y[2],
-              alpha = 1,
-              fill = codec_bi_pal[1]
-            ) +
-            annotate(
-              "rect",
-              xmin = -Inf,
-              xmax = bins_x[2],
-              ymin = bins_y[2],
-              ymax = bins_y[3],
-              alpha = 1,
-              fill = codec_bi_pal[4]
-            ) +
-            annotate(
-              "rect",
-              xmin = -Inf,
-              xmax = bins_x[2],
-              ymin = bins_y[3],
-              ymax = Inf,
-              alpha = 1,
-              fill = codec_bi_pal[7]
-            ) +
-            annotate(
-              "rect",
-              xmin = bins_x[2],
-              xmax = bins_x[3],
-              ymin = -Inf,
-              ymax = bins_y[2],
-              alpha = 1,
-              fill = codec_bi_pal[2]
-            ) +
-            annotate(
-              "rect",
-              xmin = bins_x[2],
-              xmax = bins_x[3],
-              ymin = bins_y[2],
-              ymax = bins_y[3],
-              alpha = 1,
-              fill = codec_bi_pal[5]
-            ) +
-            annotate(
-              "rect",
-              xmin = bins_x[2],
-              xmax = bins_x[3],
-              ymin = bins_y[3],
-              ymax = Inf,
-              alpha = 1,
-              fill = codec_bi_pal[8]
-            ) +
-            annotate(
-              "rect",
-              xmin = bins_x[3],
-              xmax = Inf,
-              ymin = -Inf,
-              ymax = bins_y[2],
-              alpha = 1,
-              fill = codec_bi_pal[3]
-            ) +
-            annotate(
-              "rect",
-              xmin = bins_x[3],
-              xmax = Inf,
-              ymin = bins_y[2],
-              ymax = bins_y[3],
-              alpha = 1,
-              fill = codec_bi_pal[6]
-            ) +
-            annotate(
-              "rect",
-              xmin = bins_x[3],
-              xmax = Inf,
-              ymin = bins_y[3],
-              ymax = Inf,
-              alpha = 1,
-              fill = codec_bi_pal[9]
-            )
-
-          scat <- scatter_panels +
-            geom_point_interactive(
-              data = d(),
-              aes_string(
-                x = input$x,
-                y = input$y,
-                data_id = "geo_index"
-              ),
-              fill = codec_colors()[7],
-              alpha = .8,
-              shape = 21,
-              color = "grey20",
-              stroke = .5
-            ) +
-            geom_point_interactive(
-              data = d_selected,
-              aes_string(
-                x = input$x,
-                y = input$y,
-                data_id = "geo_index"
-              ),
-              #  tooltip = paste0(
-              #   input$x, ": ", input$x, "\n",
-              #    input$y, ": ", input$y
-              #   )),
-              color = "#FFFFFF",
-              size = 3,
-              alpha = .6
-            ) +
-            theme_light() +
-            theme(
-              aspect.ratio = 1,
-              title = element_text(size = 8),
-              axis.title = element_text(
-                size = if (input$side_plot_selector == "main_map") {
-                  6
-                } else {
-                  10
-                }
-              ),
-              legend.key.size = unit(3, "mm")
-            ) +
-            labs(x = paste0(input$x), y = paste0(input$y))
-
-          hist1 <- ggplot(d()) +
-            geom_histogram_interactive(
-              aes_string(
-                x = input$x,
-                tooltip = "geo_index",
-                data_id = "geo_index"
-              ),
-              fill = codec_colors()[2],
-              bins = 20,
-              color = codec_colors()[3]
-            ) +
-            theme_minimal()
-
-          hist2 <- ggplot(d()) +
-            geom_histogram_interactive(
-              aes_string(
-                x = input$y,
-                tooltip = "geo_index",
-                data_id = "geo_index"
-              ),
-              fill = codec_colors()[2],
-              bins = 20,
-              color = codec_colors()[3]
-            ) +
-            coord_flip() +
-            theme_minimal()
-
-          scat1 <- insert_xaxis_grob(scat, hist1, position = "bottom")
-          scat2 <- insert_yaxis_grob(scat1, hist2, position = "right")
-
-          finalScat <- ggdraw() +
-            draw_plot(scat2) + # , 0, 0, 1, 1, vjust = -.2)
-            theme(plot.margin = margin(0, 0, 0, 0)) #
-
-          gir_join <- girafe(
-            ggobj = finalScat,
-            width_svg = if (input$side_plot_selector == "main_map") {
-              3
-            } else {
-              6
-            },
-            height_svg = if (input$side_plot_selector == "main_map") {
-              3
-            } else {
-              6
-            },
-            options = list(
-              opts_sizing(width = 1, rescale = T),
-              opts_selection(type = "single")
-            )
-          )
-          gir_join
-        } else {
-          bins_x <- pull(d(), input$x)
-
-          bins_x <- classInt::classIntervals(bins_x, n = 6, style = "quantile")
-
-          bins_x <- bins_x$brks
-
-          # cut into groups defined above
-          out_scat <- d() |>
-            mutate(
-              bi_x = .bincode(
-                get(input$x),
-                breaks = bins_x,
-                include.lowest = TRUE
-              )
-            ) |>
-            mutate(x_class = paste0(as.numeric(bi_x)))
-
-          scatter_panels <- ggplot(out_scat, aes_string(x = input$x)) +
-            annotate(
-              "rect",
-              xmin = -Inf,
-              xmax = bins_x[2],
-              ymin = -Inf,
-              ymax = Inf,
-              alpha = 1,
-              fill = codec_colors()[1]
-            ) +
-            annotate(
-              "rect",
-              xmin = bins_x[2],
-              xmax = bins_x[3],
-              ymin = -Inf,
-              ymax = Inf,
-              alpha = 1,
-              fill = "#567D91"
-            ) +
-            annotate(
-              "rect",
-              xmin = bins_x[3],
-              xmax = bins_x[4],
-              ymin = -Inf,
-              ymax = Inf,
-              alpha = 1,
-              fill = "#789BAC"
-            ) +
-            annotate(
-              "rect",
-              xmin = bins_x[4],
-              xmax = bins_x[5],
-              ymin = -Inf,
-              ymax = Inf,
-              alpha = 1,
-              fill = "#9FBAC8"
-            ) +
-            annotate(
-              "rect",
-              xmin = bins_x[5],
-              xmax = bins_x[6],
-              ymin = -Inf,
-              ymax = Inf,
-              alpha = 1,
-              fill = "#CCDCE3"
-            ) +
-            annotate(
-              "rect",
-              xmin = bins_x[6],
-              xmax = Inf,
-              ymin = -Inf,
-              ymax = Inf,
-              alpha = 1,
-              fill = "#F6EDDE"
-            )
-
-          scat <- scatter_panels +
-            geom_histogram_interactive(
-              d(),
-              mapping = aes_string(
-                x = input$x,
-                tooltip = "geo_index",
-                data_id = "geo_index"
-              ),
-              bins = 20,
-              alpha = .6,
-              fill = "grey70",
-              color = "grey50"
-            ) +
-            geom_segment(
-              d_selected,
-              mapping = aes_string(
-                x = input$x,
-                xend = input$x,
-                y = -1,
-                yend = 0
-              ),
-              arrow = arrow(length = unit(1, "mm"), type = "closed"),
-              color = "black"
-            ) +
-            theme_light() +
-            theme(
-              aspect.ratio = 1,
-              title = element_text(size = 8),
-              axis.title = element_text(
-                size = if (input$side_plot_selector == "main_map") {
-                  6
-                } else {
-                  10
-                }
-              ),
-              legend.key.size = unit(3, "mm")
-            ) +
-            labs(x = paste0(input$x), y = "")
-
-          gir_join <- girafe(
-            ggobj = scat,
-            width_svg = if (input$side_plot_selector == "main_map") {
-              3
-            } else {
-              6
-            },
-            height_svg = if (input$side_plot_selector == "main_map") {
-              3
-            } else {
-              6
-            },
-            options = list(
-              opts_sizing(width = 1, rescale = T),
-              opts_selection(type = "single")
-            )
-          )
-
-          gir_join
-        }
-      })
-
-      output$side_scatter <- reactive({
-        scatter_ready()
-      })
-
-      output$big_scatter <- reactive({
-        scatter_ready()
-      })
-    }
+      click <- input$big_map_click %||% input$side_map_click
+      req(click)
+      pt <- tibble(lng = click$lng, lat = click$lat) |>
+        st_as_sf(coords = c("lng", "lat"), crs = st_crs(d_geo()))
+      hit <- suppressWarnings(st_join(d_geo(), pt, left = FALSE))
+      if (nrow(hit) > 0) selected_id(hit$geo_index[1])
+    },
+    ignoreInit = TRUE
   )
 
+  # legend modal ----
   output$legend <- renderPlot({
-    legend <- bi_legend(
+    bi_legend(
       pal = codec_bi_pal,
       dim = 3,
-      xlab = paste0("Higher X Variable"),
-      ylab = paste0("Higher Y Variable"),
+      xlab = "Higher X Variable",
+      ylab = "Higher Y Variable",
       size = 12
     )
-
-    legend
   })
 
-  output$side_scatter <- reactive({
-    scatter_ready()
+  observeEvent(input$legend_modal, {
+    showModal(modalDialog(
+      title = "About Bivariate Maps",
+      p(
+        "Bivariate maps use a blended color scale to visualize two variables at the same time"
+      ),
+      plotOutput("legend"),
+      easyClose = TRUE
+    ))
   })
 
-  output$big_scatter <- reactive({
-    scatter_ready()
-  })
-
-  output$side_map <- reactive({
-    map_ready()
-  })
-
-  output$big_map <- reactive({
-    map_ready()
-  })
-
+  # clear/reset ----
   output$clear_button_panel <- renderUI({
     absolutePanel(
       id = "clear_button_panel",
@@ -1474,14 +537,7 @@ server <- function(input, output, session) {
       draggable = TRUE,
       top = 50,
       right = 20,
-      style = "z-index: 10;
-                     padding: 5px;
-                         border: 1px solid #000;
-                         background: #FFFFFF;
-                         opacity: .9;
-                         margin: auto;
-                         border-radius: 5pt;
-                         box-shadow: 0pt 0pt 6pt 0px rgba(61,59,61,0.48);",
+      style = "z-index:10;padding:5px;border:1px solid #000;background:#FFFFFF;opacity:.9;margin:auto;border-radius:5pt;box-shadow:0 0 6pt 0 rgba(61,59,61,0.48);",
       fixedRow(
         shinyWidgets::actionBttn(
           "clear_map_selection",
@@ -1490,61 +546,30 @@ server <- function(input, output, session) {
           style = "simple",
           status = "primary"
         ) |>
-          tagAppendAttributes(
-            style = "color: #FFFFFF; background-color: #396175;"
-          ),
-      )
-    )
-  })
-
-  observeEvent(input$legend_modal, {
-    showModal(
-      modalDialog(
-        title = "About Bivariate Maps",
-        p(
-          "Bivariate maps use a blended color scale to visualize two variables at the same time"
-        ),
-        plotOutput("legend"),
-        easyClose = TRUE
+          tagAppendAttributes(style = "color:#FFFFFF;background-color:#396175;")
       )
     )
   })
 
   observeEvent(input$clear_map_selection, {
-    map <-
-      leafletProxy(
-        mapId = if (input$side_plot_selector == "main_map") {
-          "big_map"
-        } else {
-          "side_map"
-        },
-        data = d()
-      ) |>
+    selected_id(NULL)
+    leafletProxy("big_map") |>
       clearShapes() |>
-      setView(-84.55, 39.18, zoom = 11.5) |>
-      addProviderTiles(provider = providers$CartoDB.Positron) |>
-      addPolygons(
-        fillColor = "#ffffff",
-        opacity = .4,
-        color = "#333333",
-        weight = .5
-      )
-
-    map
-
-    output$side_scatter <- reactive({
-      scatter_ready()
-    })
-
-    output$big_scatter <- reactive({
-      scatter_ready()
-    })
+      addProviderTiles(providers$CartoDB.Positron)
+    leafletProxy("side_map") |>
+      clearShapes() |>
+      addProviderTiles(providers$CartoDB.Positron)
+    # force re-render via invalidation
+    output$big_map <- renderLeaflet(build_map())
+    output$side_map <- renderLeaflet(build_map())
   })
 
+  # suspend when hidden (perf) ----
   outputOptions(output, 'big_map', suspendWhenHidden = TRUE)
   outputOptions(output, 'side_map', suspendWhenHidden = TRUE)
   outputOptions(output, 'big_scatter', suspendWhenHidden = TRUE)
   outputOptions(output, 'side_scatter', suspendWhenHidden = TRUE)
 }
 
+# ---- App ----
 shinyApp(ui, server)
