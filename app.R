@@ -36,12 +36,12 @@ codec_bi_pal <- c(
 )
 
 uni_colors <- c(
-  codec_colors()[1],
-  "#567D91",
-  "#789BAC",
-  "#9FBAC8",
-  "#CCDCE3",
-  "#F6EDDE"
+  "1" = codec_colors()[1],
+  "2" = "#567D91",
+  "3" = "#789BAC",
+  "4" = "#9FBAC8",
+  "5" = "#CCDCE3",
+  "6" = "#F6EDDE"
 )
 
 make_pal <- function(palette, var, levels) {
@@ -75,8 +75,8 @@ make_rectangles <- function(bins, type = c("uni", "bi")) {
       )
   } else {
     tibble(
-      xmin = c(-Inf, bins[[1]][-1]),
-      xmax = c(bins[[1]][-1], Inf),
+      xmin = c(-Inf, bins[[1]][2:6]),
+      xmax = c(bins[[1]][2:6], Inf),
       fill = uni_colors
     )
   }
@@ -432,6 +432,7 @@ server <- function(input, output, session) {
         fill = "grey70",
         color = "grey50"
       ) +
+      scale_fill_identity() +
       theme_light() +
       theme(
         aspect.ratio = 1,
